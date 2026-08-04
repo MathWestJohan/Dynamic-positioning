@@ -1,86 +1,144 @@
-# Dynamic Positioning - Simulation Project
+# Dynamic Positioning System - 3-DOF Vessel Control
 
-This repository hosts a simulation framework for dynamic vessel positioning based on **AGX Dynamics** and Python.
+Real-time dynamic positioning (DP) simulation for a surface vessel using PID + model-based feedforward control, built on the AGX Dynamics physics engine. Developed for *Simulation of Maritime Systems* (MMA4005) at NTNU.
 
-## Overview
+The system controls surge, sway, and yaw to track reference trajectories and hold position under hydrodynamic disturbances.
 
-The project is structured to simulate a 3-DOF vessel (surge, sway, and yaw) equipped with thrusters. The framework incorporates several key modules:
-1. **World Creation**: Defines the hydrodynamic environment (e.g., waves, water geometry, etc.).
-2. **Control System**: Implements PID-feedforward controllers for thrust allocation and position error correction.
-3. **Modelling**: Builds vessel geometries and simulates rigid body dynamics.
-4. **Observer**: Provides state estimates incorporating noise and wave removal techniques.
-5. **Runtime Management**: Configures scenes including vessel parameters and logging.
-6. **Visualization**: Includes tools for real-time thruster and position plotting.
-
-## Features
-- Thruster force allocation with pseudo-inverse methods for underactuated systems.
-- Vessel hydrodynamics using AGX's physical simulation APIs.
-- Planar PID controller with integral windup protection and gain scaling adaptation for rough seas.
-- State estimation using a lightweight observer and configurable noise rejection.
-- Automated logging of control efforts, positions with plotting scripts.
+![Position tracking results](assets/results_position_tracking.png)
 
 ---
 
-## Usage and Setup
+## System Architecture
 
-### Prerequisites
-- **AGX Dynamics** installed (`x64-bit`) - Ensure the compatible version matches Python `3.9.x`.
-- Python/Node dependency management suggests isolation egure configuration Environment Path SystemLEVEL creation.`JSON-scene`\matching```VersionsUpdates.+matplotlib`.uzzer ensure''.PATH-Level Scripts[].Some*PyInitid.*
+The DP stack runs as a closed-loop callback inside AGX. Each time step executes:
+
+```
+                      ┌─────────────────┐
+                      │    main.py       │
+                      │  (entry point)   │
+                      └────────┬─────────┘
+                               │
+                      ┌────────▼─────────┐
+                      │    runner.py      │
+                      │  (simulation     │
+                      │   loop & config)  │
+                      └──┬──────┬─────┬──┘
+                         │      │     │
+              ┌──────────▼──┐ ┌─▼───┐ ┌▼──────────┐
+              │  vessel.py  │ │ /   │ │  world.py  │
+              │  hull model,│ │ctrl │ │  water,    │
+              │  thrusters, │ │     │ │  waves,    │
+              │  collisions │ │     │ │  terrain   │
+              └─────────────┘ └──┬──┘ └────────────┘
+                                 │
+          ┌──────────┬───────────┼───────────┬────────────┐
+          │          │           │           │            │
+     ┌────▼───┐ ┌────▼────┐ ┌───▼────┐ ┌────▼─────┐ ┌───▼────────┐
+     │observer│ │reference│ │control-│ │allocation│ │apply forces│
+     │  state │ │  path & │ │  ler   │ │  pseudo- │ │  body→world│
+     │  est.  │ │ heading │ │PID+FF  │ │ inverse  │ │  transform │
+     └────────┘ └─────────┘ └────────┘ └──────────┘ └────────────┘
+```
+
+**DP loop per time step:**
+1. **Measure** - read vessel pose (x, y, psi) from simulation
+2. **Reference** - compute smooth target trajectory (position + heading)
+3. **Observe** - estimate state using simplified Kalman filter
+4. **Control** - PID + feedforward computes generalized forces/torques
+5. **Allocate** - pseudo-inverse maps forces to individual thruster commands
+6. **Apply** - rotate body-frame forces to world frame and apply at thruster points
 
 ---
 
-# Dynamic Positioning – AGX + Python Setup (Windows)
+## Control System
 
-This project runs with **AGX Dynamics** and a matching **CPython** version. Follow the steps to get a working environment.
+### Control Law
 
-## Prerequisites 
-- AGX installed (user install): `%LOCALAPPDATA%\Algoryx\AGX-2.40.1.5`
-- Matching **Python (64-bit)** (typically 3.9.x) Note that the AGX Dynamics version used for this project is only compatible with python v3.9.x
+PID controller with model-based feedforward:
 
+$$\tau = M\dot{\nu}_r + D\nu_r + K_p\tilde{\eta} + K_d\tilde{\nu} + K_i\int\tilde{\eta}\,dt$$
 
-## 1 Detect the required Python version
+| Symbol | Meaning |
+|--------|---------|
+| M, D | Diagonal mass/inertia and linear damping matrices |
+| nu_r, nu_dot_r | Reference body-frame velocities and accelerations |
+| eta_tilde | Pose error (world frame): eta_r - eta_hat |
+| nu_tilde | Velocity error (body frame): nu_r - nu_hat |
+| K_p, K_d, K_i | Proportional, derivative, and integral gain matrices |
 
-Open empty Command Prompt (windows search -> command prompt) and insert this command:
+The feedforward term (M * nu_dot_r + D * nu_r) compensates for known dynamics so the PID only has to handle the residual error.
 
-```bat
-"%LOCALAPPDATA%\Algoryx\AGX-2.40.1.5\python-x64\python.exe" -c "import sys; print(sys.version)"
+### Implementation Details
+
+- **Anti-windup**: integral term only accumulates when actuators are not saturated
+- **Saturation limits**: force/torque outputs clipped to physical thruster capacity
+- **Heading wrap**: yaw error wrapped to [-pi, pi]
+
+### Thruster Allocation
+
+Two stern thrusters. The allocator uses the pseudo-inverse of the thruster configuration matrix:
+
 ```
-This will detect the required python version for the AGX installation.
-
-## 2 Install required python version
-
-For people new to terminal, \path\to\your\project means just the project directory. You can make an empty folder on your desktop and open the terminal by right-clicking the folder and pressing "open with terminal". Then you insert the following commands:
-
-```bat
-cd /d C:\path\to\your\project
-py -3.9 -m venv .venv
-.\.venv\Scripts\activate
-python -m pip install --upgrade pip
-pip install numpy pyyaml pandas matplotlib
+tau = T @ f    →    f = pinv(T) @ tau
 ```
 
-After installing the python version, you also have to set the correct installation as the Python Interperter. There is no use in having python v3.9.9 if vscode python interperter is v3.13.7.
+Where tau = [Fx, Fy, Mz] and f = [Fx1, Fy1, Fx2, Fy2].
 
-## 3 Point the shell at AGX
+---
 
-In the same terminal session, enter this:
+## Results
 
-```bat
-set "AGX_DIR=%LOCALAPPDATA%\Algoryx\AGX-2.40.1.5"
-set "PATH=%AGX_DIR%\bin\x64;%PATH%"
-set "PYTHONPATH=%AGX_DIR%\bin\x64\agxpy;%AGX_DIR%\data\python\modules;%AGX_DIR%\data\python"
+100-second simulation run. The vessel tracks a path to (30, 15) m with a heading change to ~0.46 rad.
+
+**Position tracking** (top): the vessel reaches the target position. Oscillations are present throughout due to underdamped gains.
+
+**Heading tracking** (middle): heading oscillates around the reference without converging. This is the weakest axis and the gains need retuning.
+
+**Control effort** (bottom): forces remain within saturation limits. The oscillatory pattern in tau_psi corresponds to the heading oscillations.
+
+### Current Limitations
+
+- PID gains were not fully tuned due to course time constraints
+- The controller treats each DOF independently while the vessel dynamics are coupled
+- Heading control needs further work
+- No external disturbances (wind, current) modeled yet
+
+### Vessel Model
+
+The simulation uses a 3D model of the R/V Gunnerus research vessel with hydrodynamic surface interaction (waves, buoyancy).
+
+---
+
+## Project Structure
+
 ```
-This will set the environment variables for your system. If you are not comfortable with the terminal, you can navigate to the system variables window and change it there. 
-
-## 4 Test and run
-
-run this commands in the same terminal session:
-
-```bat
-python -c "import agx, agxSDK,agxPythonModules, tutorials, numpy; print('AGX OK')"
+src/
+├── main.py                  # Entry point, launches AGX simulation
+├── plot_log.py              # Post-run plotting of logged data
+├── agx_wrap/
+│   └── world.py             # Water, waves, terrain, camera setup
+├── control/
+│   ├── controller.py        # PID + feedforward controller
+│   ├── allocation.py        # Thruster force allocation (pseudo-inverse)
+│   ├── observer.py          # State estimator (simplified Kalman filter)
+│   └── reference.py         # 2nd-order trajectory and heading reference
+├── modeling/
+│   └── vessel.py            # Rigid body hull, thruster placement, force application
+└── runtime/
+    ├── runner.py             # Simulation loop, DP callback, logging
+    └── config.py             # Vessel parameters, PID gains, scene config
+assets/
+└── Gunnerus.obj             # R/V Gunnerus 3D mesh
 ```
-If terminal prints 'AGX OK', then you are ready to run this command:
-```bat
-python .\src\main.py
-```
-This will run whatever python code that resides in main.py, and open AGX Dynamics simulator. The main file can also be run from within vscode, but there may arise some issues that is not accounted for in this step by step guide (f.ex PythonModules import not resolving). A bypass from this error was to just run the python file from the terminal
+
+---
+
+## Built With
+
+- [AGX Dynamics](https://www.algoryx.se/agx-dynamics/) - multi-physics simulation engine
+- Python 3.9, NumPy, Matplotlib, Pandas, PyYAML
+- Blender (R/V Gunnerus 3D model)
+
+## Acknowledgments
+
+Developed for MMA4005 *Simulation of Maritime Systems* at NTNU, December 2025.

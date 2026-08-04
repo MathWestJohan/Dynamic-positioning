@@ -158,5 +158,5 @@ class ReferenceFilter:
         
         # Update heading
         self.psir = self._wrap_pi(self.psir + self.rr * dt)
-        #return current position(1D)/velocity and yaw-rate/heading references (pr, vr, rr, psir) 
-        return self.pr, self.vr, self.rr, self.psir
+
+        return self.pr, self.vr, ar, self.rr, alpha, self.psir

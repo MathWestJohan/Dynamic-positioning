@@ -14,10 +14,10 @@ from agxPythonModules.utils.numpy_utils import wrap_vector_as_numpy_array
 
 
 def _color(node, rgba):
-    agxOSG.setDiffuseColor(node, agx.Vec4f(*rgba)) # RGBA
-    agxOSG.setAmbientColor(node, agx.Vec4f(1)) # White ambient
-    agxOSG.setSpecularColor(node, agx.Vec4f(1)) # White specular
-    agxOSG.setShininess(node, 120) # Shininess
+    agxOSG.setDiffuseColor(node, agx.Vec4f(*rgba))
+    agxOSG.setAmbientColor(node, agx.Vec4f(rgba[0]*0.3, rgba[1]*0.3, rgba[2]*0.3, rgba[3]))
+    agxOSG.setSpecularColor(node, agx.Vec4f(0.3, 0.3, 0.3, 1))
+    agxOSG.setShininess(node, 60)
 
 
 # Ocean creation utility
@@ -89,5 +89,45 @@ def create_ocean(height=1.5, res_xy=(50, 50), size_xy=(250, 250), cell_h=20.0):
 def colorize_body(rb: agx.RigidBody, rgba=(1.0, 1.0, 0.8, 1.0)):
     node = agxOSG.createVisual(rb, root()) # Create visual node for rigid body
     _color(node, rgba) # Apply color to the visual node
-    
-    
+
+
+def _add_visual_geometry(geom, rgba):
+    geom.setEnableCollisions(False)
+    simulation().add(geom)
+    node = agxOSG.createVisual(geom, root())
+    _color(node, rgba)
+    return node
+
+
+def create_waypoint_marker(x, y, z=6.0, rgba=(0.2, 0.8, 0.2, 1.0)):
+    pole = agxCollide.Geometry(agxCollide.Cylinder(0.6, 8.0))
+    pole.setPosition(agx.Vec3(x, y, z))
+    _add_visual_geometry(pole, rgba)
+    top = agxCollide.Geometry(agxCollide.Sphere(1.5))
+    top.setPosition(agx.Vec3(x, y, z + 5.0))
+    _add_visual_geometry(top, rgba)
+    return pole, top
+
+
+def create_force_arrow(rgba=(1.0, 0.3, 0.0, 1.0)):
+    shaft_geom = agxCollide.Geometry(agxCollide.Cylinder(0.3, 1.0))
+    shaft_geom.setEnableCollisions(False)
+    body = agx.RigidBody(shaft_geom)
+    body.setMotionControl(agx.RigidBody.KINEMATICS)
+    body.setPosition(agx.Vec3(0, 0, -100))
+    simulation().add(body)
+    node = agxOSG.createVisual(body, root())
+    _color(node, rgba)
+    return body, node
+
+
+def create_trail_dot(x, y, z=4.0, rgba=(0.3, 0.5, 1.0, 0.6)):
+    dot = agxCollide.Geometry(agxCollide.Sphere(0.5))
+    dot.setPosition(agx.Vec3(x, y, z))
+    dot.setEnableCollisions(False)
+    simulation().add(dot)
+    node = agxOSG.createVisual(dot, root())
+    _color(node, rgba)
+    agxOSG.setAlpha(node, rgba[3])
+    return dot
+

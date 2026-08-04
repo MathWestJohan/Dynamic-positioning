@@ -64,9 +64,15 @@ class SceneParams:
 
 @dataclass
 class DPRoute:
-    start_xy: tuple = (0.0, 0.0)
-    goal_xy:  tuple = (30.0, 15.0)
+    waypoints: tuple = ((0.0, 0.0), (30.0, 15.0), (50.0, -10.0), (60.0, 20.0))
     psi_d:    float = None
+
+@dataclass
+class Disturbance:
+    time: float = 40.0
+    duration: float = 15.0
+    force_x: float = 0.0
+    force_y: float = 80_000.0
 
 @dataclass
 class GNSSNoise:
@@ -78,3 +84,4 @@ vessel = VesselParams()
 scene  = SceneParams()
 route  = DPRoute()
 gnss   = GNSSNoise()
+disturbance = Disturbance()
