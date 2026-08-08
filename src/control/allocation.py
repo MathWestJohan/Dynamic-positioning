@@ -2,140 +2,73 @@
 import numpy as np
 from dataclasses import dataclass
 
-# Geometry parameters for two-thruster configuration. 
+
 @dataclass
 class Geometry2Thrusters:
-    """
-    Geometry parameters for a symmetric/asymmetric two-thruster vessel layout.
+    lx1: float
+    ly1: float
+    lx2: float
+    ly2: float
+    lx_bow: float = 12.0
+    ly_bow: float = 0.0
+    biasFy: float = 0.0
 
-    Attributes
-    ----------
-    lx1 : float
-        Longitudinal offset (x) of thruster 1 (port) relative to the vessel CoM [m].
-        Convention: positive forward, negative aft.
-    ly1 : float
-        Lateral offset (y) of thruster 1 [m]. Convention: positive = port side.
-    lx2 : float
-        Longitudinal offset (x) of thruster 2 (starboard) relative to CoM [m].
-    ly2 : float
-        Lateral offset (y) of thruster 2 [m]. Convention: negative = starboard.
-    biasFy : float, optional
-        Optional small lateral-force bias applied when redistributing lateral thrust.
-        Useful to nudge actuators towards a preferred sector. Units: Newtons.
-        Default is 0.0 (no bias).
-    """
-    lx1: float  # x offset of thruster 1 (port), relative to CoM (m). Negative if behind CoM
-    ly1: float  # y offset of thruster 1 (port): positive to starboard is +y (port is +)
-    lx2: float  # x offset of thruster 2 (starboard)
-    ly2: float  # y offset of thruster 2 (starboard is -)
-    biasFy: float = 0.0    # small sway bias to keep jets in a preferred sector (optional)
 
-# Two-thruster allocator using pseudo-inverse method
 class TwoThrusterAllocator:
     """
-    Two-thruster linear allocator.
+    Thruster allocator for 2 stern azimuth thrusters + 1 bow tunnel thruster.
 
-    Maps a desired generalized force/torque vector (tau = [Fx, Fy, N]) onto individual
-    thruster force components f = [Fx1, Fy1, Fx2, Fy2] using a (left) pseudo-inverse
-    of the linear mapping T (tau = T @ f). The allocator supports simple per-axis
-    symmetric saturation and an optional lateral-bias re-distribution.
+    Maps tau = [Fx, Fy, N] to f = [Fx1, Fy1, Fx2, Fy2, Fy_bow] via pseudoinverse.
 
-    Coordinate & sign conventions
-    - Body frame: x forward, y to port (left), positive yaw N is CCW (right-hand rule).
-    - Thruster forces are expressed in the body frame at the thruster local positions.
-    - The torque (N) row of T is constructed from the moment arms (ly, -lx) such that
-      the third row computes the out-of-plane moment produced by the 2D forces.
-
-    Notes on allocation algorithm
-    1. Compute a least-squares solution using the pseudo-inverse of T:
-         f = T_pinv @ tau
-    2. Optionally apply a simple lateral-bias redistribution to encourage jets to
-       cooperate (uses Geometry2Thrusters.biasFy).
-    3. Apply symmetric per-axis saturation to each element of f (clipping to [-Tmax,Tmax]).
-       This is a very simple actuator model — more advanced allocation would include
-       thrust-vector magnitude limits, directional constraints or quadratic programming.
-
-    Parameters
-    ----------
-    geom : Geometry2Thrusters
-        Geometry description of the two thrusters.
-    Tmax : float, optional
-        Per-axis symmetric saturation limit [N]. Default 80_000.0.
+    Yaw-priority allocation: when the full demand exceeds thruster limits,
+    yaw torque is preserved at full and surge/sway are scaled down until
+    the allocation fits. This makes the ship slow down to turn rather than
+    trying to maintain speed while crabbing sideways.
     """
-    def __init__(self, geom: Geometry2Thrusters, Tmax=80_000.0):
-        """
-        Initialize allocator and compute the configuration matrix and its pseudo-inverse.
 
-        The configuration matrix T maps thruster axis forces to generalized forces:
-            tau = [Fx; Fy; N] = T @ [Fx1, Fy1, Fx2, Fy2]^T
-
-        The rows of T are:
-            [ 1, 0, 1, 0 ]     -> Fx contribution (sum of longitudinal components)
-            [ 0, 1, 0, 1 ]     -> Fy contribution (sum of lateral components)
-            [ ly1, -lx1, ly2, -lx2 ] -> yaw moment from forces (z moment arms)
-
-        Using numpy.linalg.pinv provides a robust pseudo-inverse (works even if
-        T is not full row-rank numerically).
-        """
-        self.g = geom # Geometry parameters
-        self.Tmax = float(Tmax) # Max thrust per axis (N)
+    def __init__(self, geom: Geometry2Thrusters, Tmax=150_000.0, Tmax_bow=60_000.0):
+        self.g = geom
+        self.Tmax = float(Tmax)
+        self.Tmax_bow = float(Tmax_bow)
 
         self.T = np.array([
-            [1, 0, 1, 0],
-            [0, 1, 0, 1],
-            [-self.g.ly1, self.g.lx1, -self.g.ly2, self.g.lx2]
-        ], dtype=float) # Thruster configuration matrix
-        self.Tpinv = self.T.T @ np.linalg.inv(self.T @ self.T.T) # Pseudo-inverse of T
+            [1, 0, 1, 0, 0],
+            [0, 1, 0, 1, 1],
+            [-self.g.ly1, self.g.lx1, -self.g.ly2, self.g.lx2, self.g.lx_bow]
+        ], dtype=float)
+        self.Tpinv = np.linalg.pinv(self.T)
 
-    # Saturate values symmetrically
-    @staticmethod
-    def _sat_symmetric(v, vmax):
-        return np.clip(v, -vmax, vmax) # Clip values to [-vmax, vmax]
+        self._limits = np.array([Tmax, Tmax, Tmax, Tmax, Tmax_bow])
 
-    # Allocate thrusts given desired forces/torque
+    def _feasible(self, f):
+        return np.all(np.abs(f) <= self._limits * 1.001)
+
     def allocate(self, tau_x, tau_y, tau_n):
-        """
-        Allocate thruster axis forces for a desired generalized wrench.
+        tau = np.array([tau_x, tau_y, tau_n], dtype=float)
+        f = self.Tpinv @ tau
 
-        Parameters
-        ----------
-        tau_x : float
-            Desired surge force [N].
-        tau_y : float
-            Desired sway force [N].
-        tau_n : float
-            Desired yaw moment/torque [N*m].
+        if self._feasible(f):
+            return float(f[0]), float(f[1]), float(f[2]), float(f[3]), float(f[4]), 1.0
 
-        Returns
-        -------
-        (Fx1, Fy1, Fx2, Fy2) : Tuple[float, float, float, float]
-            Per-thruster axis force components (each clipped to [-Tmax, Tmax]).
-            These are the longitudinal (x) and lateral (y) components for thruster 1 and 2.
+        # Yaw priority: check if yaw alone fits
+        f_yaw_only = self.Tpinv @ np.array([0.0, 0.0, tau_n])
+        if not self._feasible(f_yaw_only):
+            # Even pure yaw exceeds limits — scale everything proportionally
+            worst = np.max(np.abs(f) / self._limits)
+            scale = 1.0 / worst
+            f *= scale
+            return float(f[0]), float(f[1]), float(f[2]), float(f[3]), float(f[4]), scale
 
-        Behavior details
-        ----------------
-        - Uses the precomputed pseudo-inverse to obtain a minimum-norm least-squares solution.
-        - If Geometry2Thrusters.biasFy != 0.0, a simple redistribution is applied to the
-          lateral components (f[1], f[3]) in order to bias the solution towards a
-          cooperative pattern (useful for preventing one actuator from taking all lateral load).
-        - Finally, each element is clipped independently. This does NOT conserve torque/force
-          after clipping; a secondary re-distribution step could be added if conservation is required.
-        """
-        tau = np.array([tau_x, tau_y, tau_n], dtype=float) # Desired forces/torque vector
+        # Yaw fits — binary search for max surge/sway scale that keeps it feasible
+        lo, hi = 0.0, 1.0
+        for _ in range(12):
+            mid = (lo + hi) * 0.5
+            f_try = self.Tpinv @ np.array([tau_x * mid, tau_y * mid, tau_n])
+            if self._feasible(f_try):
+                lo = mid
+            else:
+                hi = mid
 
-        # Base pseudo-inverse
-        f = self.Tpinv @ tau  # [Fx1, Fy1, Fx2, Fy2]
-
-        # Optional simple sway biasing (keeps both jets cooperating)
-        if self.g.biasFy != 0.0:
-            Fy_sum = f[1] + f[3] # Sum of lateral forces
-            if Fy_sum > 0: # positive sway
-                f[1] = Fy_sum + self.g.biasFy  # port
-                f[3] = self.g.biasFy           # starboard
-            elif Fy_sum < 0: # negative sway
-                f[1] = self.g.biasFy           # port
-                f[3] = Fy_sum - self.g.biasFy  # starboard
-
-        # Saturate thrust magnitudes per-axis (very simple box saturation)
-        f = self._sat_symmetric(f, self.Tmax) # Saturate thrusts
-        return float(f[0]), float(f[1]), float(f[2]), float(f[3]) # Return thruster forces
+        f = self.Tpinv @ np.array([tau_x * lo, tau_y * lo, tau_n])
+        f = np.clip(f, -self._limits, self._limits)
+        return float(f[0]), float(f[1]), float(f[2]), float(f[3]), float(f[4]), lo

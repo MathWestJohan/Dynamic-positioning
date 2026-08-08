@@ -115,26 +115,23 @@ class ReferenceFilter:
         self.psir = psi_now
         self.rr = 0.0
 
-    def step(self, dt, pd, psi_d):
+    def step(self, dt, pd, psi_d, speed_factor=1.0):
         # --- Position channel ---
-        # Error to goal
-        ep = pd - self.pr
-        
-        # Desired velocity (limited)
-        vd = sat(self.pp.Ki * ep, -self.pp.vmax, self.pp.vmax)
-        
-        # 2nd-order dynamics: accelerate toward vd
-        # v̈r = ω^2 (vd - vr) - 2ζω v̇r  (simplified as 1st-order on vr toward vd)
-        # Or use full 2nd-order on position:
-        # p̈r = ω^2 (pd - pr) - 2ζω ṗr, with velocity limiting
-        
+        # Speed-heading coordination: scale velocity limit by speed_factor
+        # so the position reference slows down when the ship hasn't turned yet.
+        vmax_eff = self.pp.vmax * max(0.0, min(1.0, speed_factor))
+
         # Compute acceleration
         ar = self.pp.omega**2 * (pd - self.pr) - 2 * self.pp.zeta * self.pp.omega * self.vr
-        
+
         # Update velocity with limit
+        vr_old = self.vr
         self.vr += ar * dt
-        self.vr = sat(self.vr, -self.pp.vmax, self.pp.vmax)
-        
+        self.vr = sat(self.vr, -vmax_eff, vmax_eff)
+
+        # Effective acceleration after velocity clamping (for feedforward)
+        ar = (self.vr - vr_old) / dt if dt > 0 else 0.0
+
         # Update position
         self.pr += self.vr * dt
         
@@ -151,11 +148,15 @@ class ReferenceFilter:
         
         # Compute angular acceleration
         alpha = self.hp.omega**2 * epsi - 2 * self.hp.zeta * self.hp.omega * self.rr
-        
+
         # Update yaw rate with limit
+        rr_old = self.rr
         self.rr += alpha * dt
         self.rr = sat(self.rr, -self.hp.rmax, self.hp.rmax)
-        
+
+        # Effective angular acceleration after rate clamping (for feedforward)
+        alpha = (self.rr - rr_old) / dt if dt > 0 else 0.0
+
         # Update heading
         self.psir = self._wrap_pi(self.psir + self.rr * dt)
 

@@ -46,8 +46,9 @@ class Ship(agxSDK.Assembly):
                 thr_port_y=+2.76,
                 thr_star_x=-10.0,
                 thr_star_y=-2.76,
+                thr_bow_x=12.0,
+                thr_bow_y=0.0,
                 shipColor=agxRender.Color.LightYellow(),
-                 # Unused but accepted for config compatibility
                 half_length=None,
                 half_width=None,
                 half_height=None,
@@ -87,9 +88,14 @@ class Ship(agxSDK.Assembly):
     # Set Center of Mass shift by moving the visual geometry relative to the body frame
     self.ship_body.getCmFrame().setLocalTranslate(agx.Vec3(cm_shift_x, 0, 0))
     
-    # Thruster positions in ship-logical frame
+    # Thruster positions: ship-logical frame (for controller geometry)
+    # and body-local frame (for AGX force application)
     self.thruster_port_local = agx.Vec3(thr_port_x, thr_port_y, thruster_z_offset)
     self.thruster_star_local = agx.Vec3(thr_star_x, thr_star_y, thruster_z_offset)
+    self.thruster_bow_local = agx.Vec3(thr_bow_x, thr_bow_y, thruster_z_offset)
+    self.thruster_port_body = self._mesh_quat_inv * self.thruster_port_local
+    self.thruster_star_body = self._mesh_quat_inv * self.thruster_star_local
+    self.thruster_bow_body = self._mesh_quat_inv * self.thruster_bow_local
     
     # Storing the hull reference
     self.hull = self.ship_body
@@ -156,25 +162,24 @@ class Ship(agxSDK.Assembly):
     
     return x, y, yaw
 
-  def apply_thruster_forces(self, fx1, fy1, fx2, fy2):
-    """
-    Apply body-frame forces at thruster points in CoM frame.
-    """
+  def ship_force_to_world(self, fx, fy):
     q = self.ship_body.getRotation()
+    return q * (self._mesh_quat_inv * agx.Vec3(fx, fy, 0))
 
-    # Thruster 1 (port) — rotate force body→world
-    f1_world = q * agx.Vec3(fx1, fy1, 0)
-    p1_local = agx.Vec3(float(self.thruster_port_local.x()),
-                         float(self.thruster_port_local.y()),
-                         float(self.thruster_port_local.z()))
-    self.ship_body.addForceAtLocalPosition(f1_world, p1_local)
+  def apply_thruster_forces(self, fx1, fy1, fx2, fy2, fy_bow=0.0):
+    """
+    Apply ship-logical forces at thruster points, converting through the
+    mesh alignment rotation to body-local frame for AGX.
+    Bow thruster is lateral-only (fy_bow).
+    """
+    f1_world = self.ship_force_to_world(fx1, fy1)
+    self.ship_body.addForceAtLocalPosition(f1_world, self.thruster_port_body)
 
-    # Thruster 2 (starboard)
-    f2_world = q * agx.Vec3(fx2, fy2, 0)
-    p2_local = agx.Vec3(float(self.thruster_star_local.x()),
-                         float(self.thruster_star_local.y()),
-                         float(self.thruster_star_local.z()))
-    self.ship_body.addForceAtLocalPosition(f2_world, p2_local)
+    f2_world = self.ship_force_to_world(fx2, fy2)
+    self.ship_body.addForceAtLocalPosition(f2_world, self.thruster_star_body)
+
+    f_bow_world = self.ship_force_to_world(0.0, fy_bow)
+    self.ship_body.addForceAtLocalPosition(f_bow_world, self.thruster_bow_body)
     
 class surfaceWater():
   def __init__(self, sim, wwc, length, width):

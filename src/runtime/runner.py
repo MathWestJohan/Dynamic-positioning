@@ -7,6 +7,7 @@ from typing import Tuple
 import agx
 from agxPythonModules.utils.environment import simulation, application
 from agxPythonModules.utils.callbacks import StepEventCallback as Sec
+from agxPythonModules.utils.callbacks import KeyboardCallback as Input
 
 from agx_wrap.world import create_ocean, create_waypoint_marker, create_force_arrow, create_trail_dot
 from modeling.vessel import Ship
@@ -14,15 +15,24 @@ from control.reference import ReferenceFilter, PosRefParams, HeadRefParams
 from control.observer import SimpleObserver, ObsGains
 from control.controller import PIDFFController, PIDGains, ThrusterGeometry
 from control.allocation import TwoThrusterAllocator, Geometry2Thrusters
-from runtime.config import vessel as VCFG, scene as SCFG, route as RCFG, gnss as NCFG, disturbance as DCFG
+from runtime.config import vessel as VCFG, scene as SCFG, route as RCFG, gnss as NCFG, disturbance as DCFG, gains as GCFG
 
-# CSV logger with timestamp
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+_LOG_DIR = os.path.join(_PROJECT_ROOT, "logs")
+os.makedirs(_LOG_DIR, exist_ok=True)
+
 _timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-log_path = os.path.join(os.path.dirname(__file__), f"dp_log_{_timestamp}.csv")
+log_path = os.path.join(_LOG_DIR, f"dp_log_{_timestamp}.csv")
 _log_file = open(log_path, "w", newline="")
 _log_writer = csv.writer(_log_file)
-_log_writer.writerow(["t","x","y","psi","xr","yr","psir","ex","ey","epsi",
-                       "tau_x","tau_y","tau_psi","Fx1","Fy1","Fx2","Fy2","disturbance"])
+_log_writer.writerow([
+    "t", "x", "y", "psi", "xr", "yr", "psir",
+    "ex", "ey", "epsi", "ex_body", "ey_body", "pos_err",
+    "tau_x", "tau_y", "tau_psi",
+    "Fx1", "Fy1", "Fx2", "Fy2", "Fy_bow",
+    "alloc_scale", "sigma_x", "sigma_y", "sigma_psi",
+    "disturbance",
+])
 
 def _angle_of_line(x0: float, y0: float, x1: float, y1: float) -> float:
     return math.atan2(y1 - y0, x1 - x0)
@@ -39,7 +49,7 @@ def build_scene_and_start():
 
     waypoints = list(RCFG.waypoints)
     spawn = waypoints[0]
-    goals = waypoints[1:]
+    goals = list(waypoints[1:])
 
     ship = Ship(
         mass_kg=VCFG.mass,
@@ -53,8 +63,11 @@ def build_scene_and_start():
         thr_port_y=VCFG.thr_port_y,
         thr_star_x=VCFG.thr_star_x,
         thr_star_y=VCFG.thr_star_y,
+        thr_bow_x=VCFG.thr_bow_x,
+        thr_bow_y=VCFG.thr_bow_y,
     )
-    ship.setPosition(agx.Vec3(spawn[0], spawn[1], 2.0))
+    ship.setPosition(agx.Vec3(spawn[0], spawn[1], 0.0))
+    ship.ship_body.setMotionControl(agx.RigidBody.KINEMATICS)
     simulation().add(ship)
 
     # Waypoint markers
@@ -65,14 +78,51 @@ def build_scene_and_start():
         marker = create_waypoint_marker(wx, wy, z=3.0, rgba=rgba)
         wp_markers.append(marker)
 
+    # --- Keyboard waypoint control ---
+    selected_wp = [0]
+    WP_STEP = 10.0
+
+    def _move_wp(dx, dy):
+        idx = selected_wp[0]
+        if idx >= len(goals):
+            return
+        ox, oy = goals[idx]
+        goals[idx] = (ox + dx, oy + dy)
+        pole, top = wp_markers[idx]
+        pole.setPosition(agx.Vec3(ox + dx, oy + dy, 3.0))
+        top.setPosition(agx.Vec3(ox + dx, oy + dy, 8.0))
+
+    def _select_wp(data):
+        if not data.isKeyDown:
+            return
+        selected_wp[0] = (selected_wp[0] + 1) % len(goals)
+        print(f"Selected waypoint {selected_wp[0]+1}/{len(goals)}: {goals[selected_wp[0]]}")
+
+    def _wp_north(data):
+        if data.down:
+            _move_wp(WP_STEP, 0)
+    def _wp_south(data):
+        if data.down:
+            _move_wp(-WP_STEP, 0)
+    def _wp_east(data):
+        if data.down:
+            _move_wp(0, -WP_STEP)
+    def _wp_west(data):
+        if data.down:
+            _move_wp(0, WP_STEP)
+
+    Input.bind(name="select_wp", key="n", callback=_select_wp)
+    Input.bind(name="wp_north",  key=Input.KEY_Up,    callback=_wp_north)
+    Input.bind(name="wp_south",  key=Input.KEY_Down,  callback=_wp_south)
+    Input.bind(name="wp_east",   key=Input.KEY_Right, callback=_wp_east)
+    Input.bind(name="wp_west",   key=Input.KEY_Left,  callback=_wp_west)
+
     ref = ReferenceFilter(
         pos_params=PosRefParams(
-            omega=SCFG.ref_pos_wn, zeta=SCFG.ref_pos_zeta,
-            Ki=SCFG.ref_pos_Ki, vmax=SCFG.ref_pos_vmax
+            omega=SCFG.ref_pos_wn, vmax=SCFG.ref_pos_vmax
         ),
         head_params=HeadRefParams(
-            omega=SCFG.ref_head_wn, zeta=SCFG.ref_head_zeta,
-            Ki=SCFG.ref_head_Ki, rmax=SCFG.ref_head_rmax
+            omega=SCFG.ref_head_wn, rmax=SCFG.ref_head_rmax
         )
     )
     ref.reset(psi_now=ship.get_xy_psi()[2])
@@ -87,8 +137,11 @@ def build_scene_and_start():
 
     lx1, ly1 = float(ship.thruster_port_local.x()), float(ship.thruster_port_local.y())
     lx2, ly2 = float(ship.thruster_star_local.x()), float(ship.thruster_star_local.y())
-    geom = Geometry2Thrusters(lx1=lx1, ly1=ly1, lx2=lx2, ly2=ly2, biasFy=VCFG.alloc_bias_Fy)
-    alloc = TwoThrusterAllocator(geom, Tmax=VCFG.Tmax_thruster)
+    lx_bow = float(ship.thruster_bow_local.x())
+    ly_bow = float(ship.thruster_bow_local.y())
+    geom = Geometry2Thrusters(lx1=lx1, ly1=ly1, lx2=lx2, ly2=ly2,
+                              lx_bow=lx_bow, ly_bow=ly_bow, biasFy=VCFG.alloc_bias_Fy)
+    alloc = TwoThrusterAllocator(geom, Tmax=VCFG.Tmax_thruster, Tmax_bow=VCFG.Tmax_bow)
 
     thr_geom = ThrusterGeometry(lx1=lx1, ly1=ly1, lx2=lx2, ly2=ly2)
 
@@ -97,9 +150,9 @@ def build_scene_and_start():
     ctl = PIDFFController(
         M_diag=M, D_diag=D,
         gains=PIDGains(
-            Kp_x=SCFG.kp_x, Kd_x=SCFG.kd_x, Ki_x=SCFG.ki_x,
-            Kp_y=SCFG.kp_y, Kd_y=SCFG.kd_y, Ki_y=SCFG.ki_y,
-            Kp_psi=SCFG.kp_psi, Kd_psi=SCFG.kd_psi, Ki_psi=SCFG.ki_psi,
+            Kp_x=GCFG['kp_x'], Kd_x=GCFG['kd_x'], Ki_x=GCFG['ki_x'],
+            Kp_y=GCFG['kp_y'], Kd_y=GCFG['kd_y'], Ki_y=GCFG['ki_y'],
+            Kp_psi=GCFG['kp_psi'], Kd_psi=GCFG['kd_psi'], Ki_psi=GCFG['ki_psi'],
             tau_max=SCFG.tau_max
         ),
         thruster_geom=thr_geom
@@ -115,9 +168,10 @@ def build_scene_and_start():
 
     psi_d = RCFG.psi_d if RCFG.psi_d else phi[0]
 
-    # Thruster force arrows (2 per thruster: Fx and Fy components combined into one arrow)
+    # Thruster force arrows
     arrow_port_geom, arrow_port_node = create_force_arrow(rgba=(1.0, 0.3, 0.0, 1.0))
     arrow_star_geom, arrow_star_node = create_force_arrow(rgba=(1.0, 0.3, 0.0, 1.0))
+    arrow_bow_geom, arrow_bow_node = create_force_arrow(rgba=(0.2, 0.8, 1.0, 1.0))
 
     # Trail state
     trail_dots = []
@@ -129,11 +183,14 @@ def build_scene_and_start():
     sd.setText(2, "Thrusters [Fx1,Fy1,Fx2,Fy2] (kN)")
     sd.setText(3, "Commanded tau [X,Y,N]")
     sd.setText(4, "")
+    sd.setText(6, "[N] cycle WP  [arrows] move selected WP")
 
     mode = {"state": "TRANSIT"}
     goal_tol = getattr(SCFG, "goal_tol", 5.0)
     last_tau = (0.0, 0.0, 0.0)
     t_sim = 0.0
+    settled = [False]
+    SETTLE_TIME = 0.5
 
     def _advance_waypoint():
         wp_idx[0] += 1
@@ -151,34 +208,58 @@ def build_scene_and_start():
 
         ref.reset(psi_now=ship.get_xy_psi()[2])
 
-    def _update_force_arrow(arrow_geom, fx, fy, thr_local):
+    _arrow_state = {}
+
+    def _update_force_arrow(arrow_geom, fx, fy, thr_body):
         q = ship.ship_body.getRotation()
         pos = ship.ship_body.getPosition()
-        world_thr = pos + q * agx.Vec3(float(thr_local.x()), float(thr_local.y()), float(thr_local.z()))
+        world_thr = pos + q * thr_body
 
         f_mag = math.sqrt(fx*fx + fy*fy)
-        scale = min(f_mag / VCFG.Tmax_thruster * 15.0, 18.0)
 
-        if f_mag < 500.0:
+        if f_mag < 2000.0:
             arrow_geom.setPosition(agx.Vec3(0, 0, -100))
+            _arrow_state.pop(id(arrow_geom), None)
             return
 
-        f_world = q * agx.Vec3(fx, fy, 0)
+        f_world = ship.ship_force_to_world(fx, fy)
         f_dir_x = float(f_world.x())
         f_dir_y = float(f_world.y())
         angle = math.atan2(f_dir_y, f_dir_x)
+        scale = min(f_mag / VCFG.Tmax_thruster * 15.0, 18.0)
 
-        arrow_geom.setPosition(agx.Vec3(
-            float(world_thr.x()) + f_dir_x / f_mag * scale * 0.5,
-            float(world_thr.y()) + f_dir_y / f_mag * scale * 0.5,
-            float(world_thr.z()) + 4.0
-        ))
-        arrow_geom.setRotation(agx.EulerAngles(0, math.pi/2, angle))
+        target_x = float(world_thr.x()) + f_dir_x / f_mag * scale * 0.5
+        target_y = float(world_thr.y()) + f_dir_y / f_mag * scale * 0.5
+        target_z = float(world_thr.z()) + 4.0
+
+        key = id(arrow_geom)
+        alpha = 0.3
+        if key in _arrow_state:
+            prev_x, prev_y, prev_z, prev_angle = _arrow_state[key]
+            target_x = prev_x + alpha * (target_x - prev_x)
+            target_y = prev_y + alpha * (target_y - prev_y)
+            target_z = prev_z + alpha * (target_z - prev_z)
+            da = math.atan2(math.sin(angle - prev_angle), math.cos(angle - prev_angle))
+            angle = prev_angle + alpha * da
+
+        _arrow_state[key] = (target_x, target_y, target_z, angle)
+
+        arrow_geom.setPosition(agx.Vec3(target_x, target_y, target_z))
+        arrow_geom.setRotation(agx.EulerAngles(0, math.pi/2, angle - math.pi/2))
 
     def dp_step(_time: float):
         nonlocal last_tau, t_sim
         dt = simulation().getTimeStep()
         t_sim += dt
+
+        if not settled[0]:
+            if t_sim >= SETTLE_TIME:
+                ship.ship_body.setMotionControl(agx.RigidBody.DYNAMICS)
+                ship.ship_body.setVelocity(agx.Vec3(0, 0, 0))
+                ship.ship_body.setAngularVelocity(agx.Vec3(0, 0, 0))
+                settled[0] = True
+            else:
+                return
 
         x, y, psi = ship.get_xy_psi()
         if getattr(NCFG, "disable_noise", False):
@@ -203,8 +284,30 @@ def build_scene_and_start():
         xA_cur, yA_cur = origin
 
         if mode["state"] == "TRANSIT":
-            psi_target = RCFG.psi_d if RCFG.psi_d else phi[0]
-            pr, vr, ar, rr, alphar, psir = ref.step(dt, pd=L_path[0], psi_d=psi_target)
+            # LOS guidance: turn the bow toward the path instead of pushing sideways
+            dx_path = x - xA_cur
+            dy_path = y - yA_cur
+            e_crosstrack = -dx_path * math.sin(phi[0]) + dy_path * math.cos(phi[0])
+            DELTA_LOS = 80.0
+            psi_los = phi[0] + math.atan2(-e_crosstrack, DELTA_LOS)
+
+            # Turn anticipation: blend heading toward next leg before reaching WP
+            ANTICIPATION_DIST = 50.0
+            if rem_alng < ANTICIPATION_DIST and wp_idx[0] < len(goals) - 1:
+                next_goal = goals[wp_idx[0] + 1]
+                phi_next = _angle_of_line(xB_cur, yB_cur, next_goal[0], next_goal[1])
+                blend = 1.0 - rem_alng / ANTICIPATION_DIST
+                psi_los = _wrap_pi(psi_los + blend * _wrap_pi(phi_next - psi_los))
+
+            psi_target = RCFG.psi_d if RCFG.psi_d else psi_los
+
+            # Speed-heading coordination: slow position reference when
+            # ship heading hasn't caught up to the path direction.
+            hdg_err = _wrap_pi(psi_target - psi)
+            speed_factor = max(0.0, math.cos(hdg_err))
+
+            pr, vr, ar, rr, alphar, psir = ref.step(dt, pd=L_path[0], psi_d=psi_target,
+                                                     speed_factor=speed_factor)
             xr = xA_cur + pr * math.cos(phi[0])
             yr = yA_cur + pr * math.sin(phi[0])
         else:
@@ -236,8 +339,8 @@ def build_scene_and_start():
             eta_hat=(xh, yh, psih), nu_hat=(uh, vh, rh)
         )
 
-        Fx1, Fy1, Fx2, Fy2 = alloc.allocate(taux, tauy, taun)
-        ship.apply_thruster_forces(Fx1, Fy1, Fx2, Fy2)
+        Fx1, Fy1, Fx2, Fy2, Fy_bow, alloc_scale = alloc.allocate(taux, tauy, taun)
+        ship.apply_thruster_forces(Fx1, Fy1, Fx2, Fy2, Fy_bow)
         last_tau = (taux, tauy, taun)
 
         # Disturbance
@@ -254,8 +357,9 @@ def build_scene_and_start():
             ship.apply_body_drag(Fx_drag, Fy_drag, Nz_drag)
 
         # Update force arrows
-        _update_force_arrow(arrow_port_geom, Fx1, Fy1, ship.thruster_port_local)
-        _update_force_arrow(arrow_star_geom, Fx2, Fy2, ship.thruster_star_local)
+        _update_force_arrow(arrow_port_geom, Fx1, Fy1, ship.thruster_port_body)
+        _update_force_arrow(arrow_star_geom, Fx2, Fy2, ship.thruster_star_body)
+        _update_force_arrow(arrow_bow_geom, 0.0, Fy_bow, ship.thruster_bow_body)
 
         # Trail
         trail_step_counter[0] += 1
@@ -268,16 +372,31 @@ def build_scene_and_start():
         # HUD
         wp_str = f"WP {wp_idx[0]+1}/{len(goals)}" if mode["state"] == "TRANSIT" else "HOLD"
         dist_str = " | DISTURBANCE" if dist_active else ""
-        sd.setText(1, f"{wp_str} | progress {progress:6.1f}/{L_path[0]:.1f} m | rem {rem_alng:5.1f} m{dist_str}")
-        sd.setText(2, f"[{Fx1/1000:6.1f}, {Fy1/1000:6.1f}, {Fx2/1000:6.1f}, {Fy2/1000:6.1f}] kN")
-        sd.setText(3, f"tau [{taux/1000:6.1f}, {tauy/1000:6.1f}, {taun/1000:6.1f}]")
-
-        # Log
         ex = xr - xh
         ey = yr - yh
         epsi = _wrap_pi(psir - psih)
-        _log_writer.writerow([t_sim, xh, yh, psih, xr, yr, psir, ex, ey, epsi,
-                              taux, tauy, taun, Fx1, Fy1, Fx2, Fy2, dist_active])
+        c_h, s_h = math.cos(psih), math.sin(psih)
+        ex_body = c_h * ex + s_h * ey
+        ey_body = -s_h * ex + c_h * ey
+        pos_err = math.hypot(ex, ey)
+
+        speed = math.hypot(uh, vh)
+        speed_kn = speed * 1.944
+        sd.setText(1, f"{wp_str} | progress {progress:6.1f}/{L_path[0]:.1f} m | rem {rem_alng:5.1f} m | {speed:.1f} m/s ({speed_kn:.1f} kn){dist_str}")
+        sd.setText(2, f"stern[{Fx1/1000:5.0f},{Fy1/1000:5.0f},{Fx2/1000:5.0f},{Fy2/1000:5.0f}] bow[{Fy_bow/1000:4.0f}] kN  alloc {alloc_scale:.0%}")
+        sd.setText(3, f"tau [{taux/1000:6.1f}, {tauy/1000:6.1f}, {taun/1000:6.1f}]")
+        sd.setText(4, f"psi {math.degrees(psih):+6.1f} ref {math.degrees(psir):+6.1f} err {math.degrees(epsi):+6.1f} deg | pos_err {pos_err:.1f} m")
+        sd.setText(5, f"body err  surge {ex_body:+7.1f}  sway {ey_body:+7.1f} m | integ [{ctl.sigma_x/1000:.1f}, {ctl.sigma_y/1000:.1f}, {ctl.sigma_psi/1000:.1f}] kN")
+
+        # Log (extended columns)
+        _log_writer.writerow([
+            t_sim, xh, yh, psih, xr, yr, psir,
+            ex, ey, epsi, ex_body, ey_body, pos_err,
+            taux, tauy, taun,
+            Fx1, Fy1, Fx2, Fy2, Fy_bow,
+            alloc_scale, ctl.sigma_x, ctl.sigma_y, ctl.sigma_psi,
+            dist_active,
+        ])
 
     Sec.preCallback(lambda t: dp_step(t))
 
@@ -296,3 +415,5 @@ def build_scene_and_start():
     cam.nearClippingPlane = 0.1
     cam.farClippingPlane  = 5000.0
     application().applyCameraData(cam)
+
+    simulation().setTimeStep(simulation().getTimeStep() * 4.0)

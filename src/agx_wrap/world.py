@@ -21,7 +21,7 @@ def _color(node, rgba):
 
 
 # Ocean creation utility
-def create_ocean(height=1.5, res_xy=(50, 50), size_xy=(250, 250), cell_h=20.0):
+def create_ocean(height=1.5, res_xy=(80, 80), size_xy=(500, 500), cell_h=20.0):
     """
     Builds animated heightfield-water + hydrodynamics registration (WindAndWaterController).
     Returns (hf, water_geom, wwc, wave_updater).
@@ -110,10 +110,18 @@ def create_waypoint_marker(x, y, z=6.0, rgba=(0.2, 0.8, 0.2, 1.0)):
 
 
 def create_force_arrow(rgba=(1.0, 0.3, 0.0, 1.0)):
-    shaft_geom = agxCollide.Geometry(agxCollide.Cylinder(0.3, 1.0))
-    shaft_geom.setEnableCollisions(False)
-    body = agx.RigidBody(shaft_geom)
+    body = agx.RigidBody()
     body.setMotionControl(agx.RigidBody.KINEMATICS)
+
+    shaft = agxCollide.Geometry(agxCollide.Cylinder(0.25, 5.0))
+    shaft.setEnableCollisions(False)
+    body.add(shaft)
+
+    tip = agxCollide.Geometry(agxCollide.Cylinder(0.7, 1.5))
+    tip.setEnableCollisions(False)
+    tip.setLocalPosition(agx.Vec3(0, 3.25, 0))
+    body.add(tip)
+
     body.setPosition(agx.Vec3(0, 0, -100))
     simulation().add(body)
     node = agxOSG.createVisual(body, root())

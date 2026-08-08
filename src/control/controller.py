@@ -208,8 +208,7 @@ class PIDFFController:
         tau_ff_y = self.M[1] * vdot_r + self.D[1] * v_r
         tau_ff_psi = self.M[2] * rdot_r + self.D[2] * r_r
         
-        # Yaw moment saturation limit
-        tau_psi_max = tau_max * 4.0 
+        tau_psi_max = tau_max * 3.0
         
         # PID terms
         # Surge (x)
@@ -230,10 +229,11 @@ class PIDFFController:
                                g.Kd_psi * e_r +
                                self.sigma_psi)
         
-        # Saturate
+        tau_sway_max = tau_max * 0.3
+
         tau_x = self._sat(tau_x_unsaturated, tau_max)
-        tau_y = self._sat(tau_y_unsaturated, tau_max)
-        tau_psi = self._sat(tau_psi_unsaturated, tau_psi_max)  # Higher limit for yaw moment
+        tau_y = self._sat(tau_y_unsaturated, tau_sway_max)
+        tau_psi = self._sat(tau_psi_unsaturated, tau_psi_max)
         
         # Anti-windup
         if abs(tau_x_unsaturated) < tau_max:
@@ -244,11 +244,11 @@ class PIDFFController:
         self.sigma_x = self._sat(self.sigma_x, tau_max * 0.3)
         
         # Sway
-        if abs(tau_y_unsaturated) < tau_max:
+        if abs(tau_y_unsaturated) < tau_sway_max:
             self.sigma_y += g.Ki_y * e_y_body * dt
         else:
             self.sigma_y *= (1.0 - 0.1 * dt)
-        self.sigma_y = self._sat(self.sigma_y, tau_max * 0.3)
+        self.sigma_y = self._sat(self.sigma_y, tau_sway_max * 0.3)
         
         # Yaw
         if abs(tau_psi_unsaturated) < tau_psi_max:
